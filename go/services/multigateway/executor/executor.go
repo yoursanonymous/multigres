@@ -1,4 +1,4 @@
-// Copyright 2025 Supabase, Inc.
+// Copyright 2026 Supabase, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ func NewExecutor(exec engine.IExecute, logger *slog.Logger) *Executor {
 		logger.Warn("failed to initialise some transaction metrics", "error", err)
 	}
 	return &Executor{
-		planner: planner.NewPlanner(DefaultTableGroup, logger, txnMetrics),
+		planner: planner.NewPlanner(DefaultTableGroup, logger, txnMetrics, nil, nil),
 		exec:    exec,
 		logger:  logger,
 	}

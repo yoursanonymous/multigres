@@ -1,4 +1,4 @@
-// Copyright 2025 Supabase, Inc.
+// Copyright 2026 Supabase, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@ import (
 	"github.com/multigres/multigres/go/common/parser/ast"
 	"github.com/multigres/multigres/go/common/pgprotocol/server"
 	"github.com/multigres/multigres/go/common/preparedstatement"
+	"github.com/multigres/multigres/go/common/topoclient"
+	"github.com/multigres/multigres/go/services/multigateway/ddlcache"
 	"github.com/multigres/multigres/go/services/multigateway/engine"
 )
 
@@ -35,16 +37,20 @@ type Planner struct {
 	logger *slog.Logger
 
 	// txnMetrics is injected into TransactionPrimitive at creation time
-	// for recording transaction duration and count.
 	txnMetrics *engine.TransactionMetrics
+
+	ddlCache  *ddlcache.DDLCache
+	topoStore topoclient.Store
 }
 
 // NewPlanner creates a new query planner.
-func NewPlanner(defaultTableGroup string, logger *slog.Logger, txnMetrics *engine.TransactionMetrics) *Planner {
+func NewPlanner(defaultTableGroup string, logger *slog.Logger, txnMetrics *engine.TransactionMetrics, ddlCache *ddlcache.DDLCache, topoStore topoclient.Store) *Planner {
 	return &Planner{
 		defaultTableGroup: defaultTableGroup,
 		logger:            logger,
 		txnMetrics:        txnMetrics,
+		ddlCache:          ddlCache,
+		topoStore:         topoStore,
 	}
 }
 
@@ -135,11 +141,19 @@ func (p *Planner) Plan(
 		if vs := stmt.(*ast.ViewStmt); vs.View != nil && vs.View.RelPersistence == ast.RELPERSISTENCE_TEMP {
 			return p.planTempTableCreation(sql, conn)
 		}
-		plan, err = p.planDefault(sql, conn)
+		if isDDLWithCachedObject(stmt) {
+			plan, err = p.planDDLWithCacheInvalidation(sql, stmt, conn)
+		} else {
+			plan, err = p.planDefault(sql, conn)
+		}
 
 	default:
-		// Default: simple route to PostgreSQL
-		plan, err = p.planDefault(sql, conn)
+		if isDDLWithCachedObject(stmt) {
+			plan, err = p.planDDLWithCacheInvalidation(sql, stmt, conn)
+		} else {
+			// Default: simple route to PostgreSQL
+			plan, err = p.planDefault(sql, conn)
+		}
 	}
 
 	if err != nil {

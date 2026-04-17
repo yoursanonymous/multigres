@@ -67,6 +67,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -155,6 +156,15 @@ type GlobalStore interface {
 	// it will proceed even if references exist, potentially leaving the system
 	// in an inconsistent state.
 	DeleteDatabase(ctx context.Context, database string, force bool) error
+
+	// GetDDLSchemaVersion retrieves the cluster-wide DDL schema version indicator.
+	GetDDLSchemaVersion(ctx context.Context) (int64, error)
+
+	// IncrDDLSchemaVersion safely increments the global DDL schema version.
+	IncrDDLSchemaVersion(ctx context.Context) error
+
+	// WatchDDLSchemaVersion returns a channel that emits whenever the DDL schema version changes.
+	WatchDDLSchemaVersion(ctx context.Context) (<-chan int64, error)
 }
 
 // CellStore defines APIs for cell-level dynamic metadata.
@@ -611,4 +621,91 @@ func (ts *store) Close() error {
 	}()
 
 	return err
+}
+
+func (ts *store) GetDDLSchemaVersion(ctx context.Context) (int64, error) {
+	bytes, _, err := ts.globalTopo.Get(ctx, DatabasesPath+"/ddl_schema_version")
+	if err != nil {
+		if errors.Is(err, &TopoError{Code: NoNode}) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if bytes == nil {
+		return 0, nil
+	}
+	v, err := strconv.ParseInt(string(bytes), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse ddl schema version: %w", err)
+	}
+	return v, nil
+}
+
+func (ts *store) IncrDDLSchemaVersion(ctx context.Context) error {
+	for {
+		bytes, versionData, err := ts.globalTopo.Get(ctx, DatabasesPath+"/ddl_schema_version")
+		if err != nil && !errors.Is(err, &TopoError{Code: NoNode}) {
+			return err
+		}
+
+		var current int64 = 0
+		if bytes != nil {
+			current, _ = strconv.ParseInt(string(bytes), 10, 64)
+		}
+		newBytes := []byte(strconv.FormatInt(current+1, 10))
+
+		var updateErr error
+		if bytes == nil {
+			_, updateErr = ts.globalTopo.Create(ctx, DatabasesPath+"/ddl_schema_version", newBytes)
+		} else {
+			_, updateErr = ts.globalTopo.Update(ctx, DatabasesPath+"/ddl_schema_version", newBytes, versionData)
+		}
+
+		if updateErr == nil {
+			return nil
+		}
+		if errors.Is(updateErr, &TopoError{Code: BadVersion}) || errors.Is(updateErr, &TopoError{Code: NodeExists}) {
+			continue
+		}
+		return updateErr
+	}
+}
+
+func (ts *store) WatchDDLSchemaVersion(ctx context.Context) (<-chan int64, error) {
+	current, changes, err := ts.globalTopo.Watch(ctx, DatabasesPath+"/ddl_schema_version")
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan int64, 16)
+
+	if current != nil && len(current.Contents) > 0 {
+		v, err := strconv.ParseInt(string(current.Contents), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse initial ddl schema version: %w", err)
+		}
+		ch <- v
+	}
+
+	go func() {
+		defer close(ch)
+		for watchData := range changes {
+			if watchData.Err != nil {
+				return
+			}
+			if len(watchData.Contents) == 0 {
+				continue
+			}
+			v, err := strconv.ParseInt(string(watchData.Contents), 10, 64)
+			if err != nil {
+				return
+			}
+			select {
+			case ch <- v:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return ch, nil
 }
