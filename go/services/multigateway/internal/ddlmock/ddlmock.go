@@ -15,13 +15,18 @@ import (
 	"github.com/multigres/multigres/go/common/topoclient"
 )
 
+type watcher struct {
+	ch   chan int64
+	done chan struct{}
+}
+
 // ensure it implements Store
 type MockTopoStore struct {
 	topoclient.Store // embed to satisfy all other methods implicitly
 	
 	ddlMu           sync.Mutex
 	ddlVersion      int64
-	ddlWatchers     []chan int64
+	ddlWatchers     []*watcher
 	failNextIncrDDL error
 }
 
@@ -51,13 +56,14 @@ func (m *MockTopoStore) IncrDDLSchemaVersion(ctx context.Context) error {
 	}
 	m.ddlVersion++
 	newVersion := m.ddlVersion
-	watchers := make([]chan int64, len(m.ddlWatchers))
+	watchers := make([]*watcher, len(m.ddlWatchers))
 	copy(watchers, m.ddlWatchers)
 	m.ddlMu.Unlock()
 
-	for _, ch := range watchers {
+	for _, w := range watchers {
 		select {
-		case ch <- newVersion:
+		case w.ch <- newVersion:
+		case <-w.done:  // watcher already closed, skip safely
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -67,13 +73,14 @@ func (m *MockTopoStore) IncrDDLSchemaVersion(ctx context.Context) error {
 
 func (m *MockTopoStore) EmitDDLVersionEvent(ctx context.Context, version int64) {
 	m.ddlMu.Lock()
-	watchers := make([]chan int64, len(m.ddlWatchers))
+	watchers := make([]*watcher, len(m.ddlWatchers))
 	copy(watchers, m.ddlWatchers)
 	m.ddlMu.Unlock()
 
-	for _, ch := range watchers {
+	for _, w := range watchers {
 		select {
-		case ch <- version:
+		case w.ch <- version:
+		case <-w.done:
 		case <-ctx.Done():
 			return
 		}
@@ -82,20 +89,23 @@ func (m *MockTopoStore) EmitDDLVersionEvent(ctx context.Context, version int64) 
 
 func (m *MockTopoStore) WatchDDLSchemaVersion(ctx context.Context) (<-chan int64, error) {
 	ch := make(chan int64, 16)
+	w := &watcher{ch: ch, done: make(chan struct{})}
+
 	m.ddlMu.Lock()
-	m.ddlWatchers = append(m.ddlWatchers, ch)
+	m.ddlWatchers = append(m.ddlWatchers, w)
 	m.ddlMu.Unlock()
 
 	go func() {
 		<-ctx.Done()
 		m.ddlMu.Lock()
-		for i, w := range m.ddlWatchers {
-			if w == ch {
+		for i, existing := range m.ddlWatchers {
+			if existing == w {
 				m.ddlWatchers = append(m.ddlWatchers[:i], m.ddlWatchers[i+1:]...)
 				break
 			}
 		}
 		m.ddlMu.Unlock()
+		close(w.done)
 		close(ch)
 	}()
 

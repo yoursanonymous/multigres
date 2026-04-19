@@ -65,7 +65,7 @@ func TestWatchInvalidatesOnVersionBump(t *testing.T) {
 	c.SetView("public.my_view", &ddlcache.ViewDefinition{SQL: "SELECT 1"})
 	require.NotNil(t, c.GetView("public.my_view"), "precondition: view must be cached")
 
-	time.Sleep(50 * time.Millisecond) // wait for watch loop
+	require.NoError(t, c.WaitReady(ctx)) // wait for watch loop
 
 	err := store.IncrDDLSchemaVersion(ctx)
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestWatchDoesNotInvalidateOnSameVersion(t *testing.T) {
 	defer c.Shutdown()
 
 	c.SetView("v", &ddlcache.ViewDefinition{SQL: "SELECT 1"})
-	time.Sleep(50 * time.Millisecond) // wait for watch loop
+	require.NoError(t, c.WaitReady(ctx)) // wait for watch loop
 
 	store.EmitDDLVersionEvent(ctx, 5)
 
@@ -104,7 +104,7 @@ func TestColdStartRaceCondition(t *testing.T) {
 	c.Start(ctx)
 	defer c.Shutdown()
 
-	time.Sleep(50 * time.Millisecond) // wait for watch loop to start
+	require.NoError(t, c.WaitReady(ctx)) // wait for watch loop to start
 
 	// Set the stale view BEFORE bumping the version. The mock's
 	// IncrDDLSchemaVersion notifies watchers synchronously, so if we bumped

@@ -142,14 +142,22 @@ func (p *Planner) Plan(
 			return p.planTempTableCreation(sql, conn)
 		}
 		if isDDLWithCachedObject(stmt) {
-			plan, err = p.planDDLWithCacheInvalidation(sql, stmt, conn)
+			if p.ddlCache != nil && p.topoStore != nil {
+				plan, err = p.planDDLWithCacheInvalidation(sql, stmt, conn)
+			} else {
+				plan, err = p.planDefault(sql, conn)
+			}
 		} else {
 			plan, err = p.planDefault(sql, conn)
 		}
 
 	default:
 		if isDDLWithCachedObject(stmt) {
-			plan, err = p.planDDLWithCacheInvalidation(sql, stmt, conn)
+			if p.ddlCache != nil && p.topoStore != nil {
+				plan, err = p.planDDLWithCacheInvalidation(sql, stmt, conn)
+			} else {
+				plan, err = p.planDefault(sql, conn)
+			}
 		} else {
 			// Default: simple route to PostgreSQL
 			plan, err = p.planDefault(sql, conn)

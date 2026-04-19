@@ -642,6 +642,7 @@ func (ts *store) GetDDLSchemaVersion(ctx context.Context) (int64, error) {
 }
 
 func (ts *store) IncrDDLSchemaVersion(ctx context.Context) error {
+	backoff := 5 * time.Millisecond
 	for {
 		bytes, versionData, err := ts.globalTopo.Get(ctx, DatabasesPath+"/ddl_schema_version")
 		if err != nil && !errors.Is(err, &TopoError{Code: NoNode}) {
@@ -650,7 +651,10 @@ func (ts *store) IncrDDLSchemaVersion(ctx context.Context) error {
 
 		var current int64 = 0
 		if bytes != nil {
-			current, _ = strconv.ParseInt(string(bytes), 10, 64)
+			current, err = strconv.ParseInt(string(bytes), 10, 64)
+			if err != nil {
+				return fmt.Errorf("ddl_schema_version corrupted in topo: %w", err)
+			}
 		}
 		newBytes := []byte(strconv.FormatInt(current+1, 10))
 
@@ -664,7 +668,14 @@ func (ts *store) IncrDDLSchemaVersion(ctx context.Context) error {
 		if updateErr == nil {
 			return nil
 		}
-		if errors.Is(updateErr, &TopoError{Code: BadVersion}) || errors.Is(updateErr, &TopoError{Code: NodeExists}) {
+		if errors.Is(updateErr, &TopoError{Code: BadVersion}) ||
+			errors.Is(updateErr, &TopoError{Code: NodeExists}) {
+			select {
+			case <-time.After(backoff):
+				backoff = min(backoff*2, 500*time.Millisecond)
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 			continue
 		}
 		return updateErr

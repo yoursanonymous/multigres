@@ -51,6 +51,13 @@ func isDDLWithCachedObject(stmt ast.Stmt) bool {
 	return false
 }
 
+func qualifiedName(schema, rel string) string {
+    if schema != "" {
+        return schema + "." + rel
+    }
+    return rel
+}
+
 // extractDDLObjectName returns the fully-qualified name of the object
 // affected by stmt, suitable for use as the DDL cache key.
 //
@@ -59,33 +66,32 @@ func isDDLWithCachedObject(stmt ast.Stmt) bool {
 // callers should treat an empty name as a signal to call InvalidateAll
 // rather than InvalidateObject.
 func extractDDLObjectName(stmt ast.Stmt) string {
-	switch s := stmt.(type) {
-	case *ast.ViewStmt:
-		if s.View != nil {
-			return s.View.RelName
-		}
-		return ""
-	case *ast.DropStmt:
-		if s.RemoveType == ast.OBJECT_VIEW && s.Objects != nil && s.Objects.Len() == 1 {
-			// In PostgreSQL DropStmt, Objects contains a List of object names
-			// Each item is typically a String
-			if str, ok := s.Objects.Items[0].(*ast.String); ok {
-				return str.SVal
-			}
-		}
-		return ""
-	case *ast.RenameStmt:
-		if s.Relation != nil {
-			return s.Relation.RelName
-		}
-		return ""
-	case *ast.AlterTableStmt:
-		if s.Relation != nil {
-			return s.Relation.RelName
-		}
-		return ""
-	}
-	return ""
+    switch s := stmt.(type) {
+    case *ast.ViewStmt:
+        if s.View == nil {
+            return ""
+        }
+        return qualifiedName(s.View.SchemaName, s.View.RelName)
+    case *ast.RenameStmt:
+        if s.Relation != nil {
+            return qualifiedName(s.Relation.SchemaName, s.Relation.RelName)
+        }
+        return ""
+    case *ast.AlterTableStmt:
+        if s.Relation != nil {
+            return qualifiedName(s.Relation.SchemaName, s.Relation.RelName)
+        }
+        return ""
+    case *ast.DropStmt:
+        if s.RemoveType == ast.OBJECT_VIEW &&
+            s.Objects != nil && s.Objects.Len() == 1 {
+            if str, ok := s.Objects.Items[0].(*ast.String); ok {
+                return str.SVal
+            }
+        }
+        return "" // multi-object drop → InvalidateAll
+    }
+    return ""
 }
 
 func (p *Planner) planDDLWithCacheInvalidation(
